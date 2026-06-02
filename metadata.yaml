@@ -1,0 +1,11 @@
+name: astrbot_plugin_groupkw
+desc: 多群关键词自动回复，每个群独立配置，群主管理员可自助管理本群关键词
+short_desc: 多群独立的关键词自动回复
+help: |
+  群主/管理员：/加词 关键词 回复  /删词 关键词  /修改 关键词 回复  /关键词清单
+  消息中包含关键词即自动回复。每个群的关键词互相独立。
+version: 1.0.0
+author: Oct1Nov0
+repo: https://github.com/Oct1Nov0/astrbot_plugin_groupkw
+support_platforms:
+  - aiocqhttp
