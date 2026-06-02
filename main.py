@@ -78,9 +78,9 @@ class GroupKeywordPlugin(Star):
             return ""
 
     # ---------- 添加关键词 ----------
-    @filter.command("加词")
+    @filter.command("添加")
     async def add_kw(self, event: AstrMessageEvent):
-        """添加本群关键词。格式：/加词 关键词 回复内容"""
+        """添加本群关键词。格式：/添加 关键词 回复内容"""
         gid = self._get_group_id(event)
         if not gid:
             yield event.plain_result("请在群里使用本指令。")
@@ -90,7 +90,7 @@ class GroupKeywordPlugin(Star):
             return
         parts = event.message_str.strip().split(maxsplit=2)
         if len(parts) < 3:
-            yield event.plain_result("格式：/加词 关键词 回复内容\n例如：/加词 发货 每周三统一发货哦")
+            yield event.plain_result("格式：/添加 关键词 回复内容\n例如：/添加 发货 每周三统一发货哦")
             return
         keyword = parts[1].strip()
         reply = parts[2].strip()
@@ -99,7 +99,7 @@ class GroupKeywordPlugin(Star):
         c.execute("SELECT id FROM keywords WHERE group_id=? AND keyword=?", (gid, keyword))
         if c.fetchone():
             conn.close()
-            yield event.plain_result(f"关键词「{keyword}」本群已存在，想改用 /修改 {keyword} 新回复。")
+            yield event.plain_result(f"关键词「{keyword}」本群已存在，用 /修改 {keyword} 新回复。")
             return
         c.execute(
             "INSERT INTO keywords (group_id, keyword, reply, created_by, created_at) VALUES (?,?,?,?,?)",
@@ -110,9 +110,9 @@ class GroupKeywordPlugin(Star):
         yield event.plain_result(f"已添加关键词「{keyword}」。")
 
     # ---------- 删除关键词 ----------
-    @filter.command("删词")
+    @filter.command("删除")
     async def del_kw(self, event: AstrMessageEvent):
-        """删除本群关键词。格式：/删词 关键词"""
+        """删除本群关键词。格式：/删除 关键词"""
         gid = self._get_group_id(event)
         if not gid:
             yield event.plain_result("请在群里使用本指令。")
@@ -122,7 +122,7 @@ class GroupKeywordPlugin(Star):
             return
         parts = event.message_str.strip().split(maxsplit=1)
         if len(parts) < 2:
-            yield event.plain_result("格式：/删词 关键词")
+            yield event.plain_result("格式：/删除 关键词")
             return
         keyword = parts[1].strip()
         conn = self._conn()
@@ -158,7 +158,7 @@ class GroupKeywordPlugin(Star):
         c.execute("SELECT id FROM keywords WHERE group_id=? AND keyword=?", (gid, keyword))
         if not c.fetchone():
             conn.close()
-            yield event.plain_result(f"本群没有关键词「{keyword}」，想新增用 /加词。")
+            yield event.plain_result(f"本群没有关键词「{keyword}」，想新增用 /添加。")
             return
         c.execute(
             "UPDATE keywords SET reply=?, created_by=?, created_at=? WHERE group_id=? AND keyword=?",
@@ -182,7 +182,7 @@ class GroupKeywordPlugin(Star):
         rows = c.fetchall()
         conn.close()
         if not rows:
-            yield event.plain_result("本群还没有设置关键词。群主或管理员可用 /加词 添加。")
+            yield event.plain_result("本群还没有设置关键词。群主或管理员可用 /添加 添加。")
             return
         lines = [f"本群关键词（共{len(rows)}个）："]
         for r in rows:
