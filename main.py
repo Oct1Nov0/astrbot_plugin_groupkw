@@ -6,7 +6,7 @@ from astrbot.api.star import Context, Star, register
 from astrbot.api import logger, AstrBotConfig
 
 
-@register("groupkw", "Oct1Nov0", "多群关键词自动回复，群主管理员可自助管理本群关键词", "1.0.0", "https://github.com/Oct1Nov0/astrbot_plugin_groupkw")
+@register("groupkw", "Oct1Nov0", "多群关键词自动回复，群主管理员可自助管理本群关键词", "1.1.0", "https://github.com/Oct1Nov0/astrbot_plugin_groupkw")
 class GroupKeywordPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -23,6 +23,9 @@ class GroupKeywordPlugin(Star):
         if not raw:
             return []
         return [q.strip() for q in str(raw).split(",") if q.strip()]
+
+    def _is_super(self, event: AstrMessageEvent) -> bool:
+        return str(event.get_sender_id()) in self._super_admins()
 
     def _conn(self):
         conn = sqlite3.connect(self.db_path)
@@ -43,14 +46,28 @@ class GroupKeywordPlugin(Star):
             UNIQUE(group_id, keyword)
         )
         """)
+        c.execute("""
+        CREATE TABLE IF NOT EXISTS enabled_groups (
+            group_id TEXT PRIMARY KEY,
+            enabled_at TEXT
+        )
+        """)
         conn.commit()
         conn.close()
 
     def _now(self):
         return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+    def _is_group_enabled(self, gid: str) -> bool:
+        conn = self._conn()
+        c = conn.cursor()
+        c.execute("SELECT 1 FROM enabled_groups WHERE group_id=?", (gid,))
+        row = c.fetchone()
+        conn.close()
+        return row is not None
+
     def _can_manage(self, event: AstrMessageEvent) -> bool:
-        if str(event.get_sender_id()) in self._super_admins():
+        if self._is_super(event):
             return True
         try:
             raw = event.message_obj.raw_message
@@ -75,12 +92,50 @@ class GroupKeywordPlugin(Star):
         except Exception:
             return ""
 
+    @filter.command("开启")
+    async def enable_group(self, event: AstrMessageEvent):
+        """超级管理员在指定群开启关键词功能。格式：/开启 群号"""
+        if not self._is_super(event):
+            yield event.plain_result("只有超级管理员才能开启或关闭群。")
+            return
+        parts = event.message_str.strip().split(maxsplit=1)
+        if len(parts) < 2 or not parts[1].strip().isdigit():
+            yield event.plain_result("格式：/开启 群号\n例如：/开启 1234567")
+            return
+        gid = parts[1].strip()
+        conn = self._conn()
+        c = conn.cursor()
+        c.execute("INSERT OR REPLACE INTO enabled_groups (group_id, enabled_at) VALUES (?,?)", (gid, self._now()))
+        conn.commit()
+        conn.close()
+        yield event.plain_result(f"已在群 {gid} 开启关键词功能。该群群主、管理员现在可以管理本群关键词。")
+
+    @filter.command("关闭")
+    async def disable_group(self, event: AstrMessageEvent):
+        """超级管理员关闭指定群的关键词功能。格式：/关闭 群号"""
+        if not self._is_super(event):
+            yield event.plain_result("只有超级管理员才能开启或关闭群。")
+            return
+        parts = event.message_str.strip().split(maxsplit=1)
+        if len(parts) < 2 or not parts[1].strip().isdigit():
+            yield event.plain_result("格式：/关闭 群号\n例如：/关闭 1234567")
+            return
+        gid = parts[1].strip()
+        conn = self._conn()
+        c = conn.cursor()
+        c.execute("DELETE FROM enabled_groups WHERE group_id=?", (gid,))
+        conn.commit()
+        conn.close()
+        yield event.plain_result(f"已关闭群 {gid} 的关键词功能（已设置的关键词保留，再次 /开启 即可恢复）。")
+
     @filter.command("添加")
     async def add_kw(self, event: AstrMessageEvent):
         """添加本群关键词。格式：/添加 关键词 回复内容"""
         gid = self._get_group_id(event)
         if not gid:
             yield event.plain_result("请在群里使用本指令。")
+            return
+        if not self._is_group_enabled(gid):
             return
         if not self._can_manage(event):
             yield event.plain_result("只有本群群主、管理员才能管理关键词。")
@@ -113,6 +168,8 @@ class GroupKeywordPlugin(Star):
         if not gid:
             yield event.plain_result("请在群里使用本指令。")
             return
+        if not self._is_group_enabled(gid):
+            return
         if not self._can_manage(event):
             yield event.plain_result("只有本群群主、管理员才能管理关键词。")
             return
@@ -138,6 +195,8 @@ class GroupKeywordPlugin(Star):
         gid = self._get_group_id(event)
         if not gid:
             yield event.plain_result("请在群里使用本指令。")
+            return
+        if not self._is_group_enabled(gid):
             return
         if not self._can_manage(event):
             yield event.plain_result("只有本群群主、管理员才能管理关键词。")
@@ -170,6 +229,8 @@ class GroupKeywordPlugin(Star):
         if not gid:
             yield event.plain_result("请在群里使用本指令。")
             return
+        if not self._is_group_enabled(gid):
+            return
         conn = self._conn()
         c = conn.cursor()
         c.execute("SELECT keyword, reply FROM keywords WHERE group_id=? ORDER BY id", (gid,))
@@ -189,10 +250,12 @@ class GroupKeywordPlugin(Star):
         gid = self._get_group_id(event)
         if not gid:
             return
+        if not self._is_group_enabled(gid):
+            return
         msg = event.message_str.strip()
         if not msg:
             return
-        cmd_words = ("添加", "删除", "修改", "关键词清单")
+        cmd_words = ("添加", "删除", "修改", "关键词清单", "开启", "关闭")
         cleaned = msg.lstrip("/／!！#").strip()
         if cleaned.startswith(cmd_words):
             return
