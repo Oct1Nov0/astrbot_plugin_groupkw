@@ -50,10 +50,8 @@ class GroupKeywordPlugin(Star):
         return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     def _can_manage(self, event: AstrMessageEvent) -> bool:
-        # 超级管理员永远可以管
         if str(event.get_sender_id()) in self._super_admins():
             return True
-        # 尝试读取群角色（owner / admin）
         try:
             raw = event.message_obj.raw_message
             role = None
@@ -77,7 +75,6 @@ class GroupKeywordPlugin(Star):
         except Exception:
             return ""
 
-    # ---------- 添加关键词 ----------
     @filter.command("添加")
     async def add_kw(self, event: AstrMessageEvent):
         """添加本群关键词。格式：/添加 关键词 回复内容"""
@@ -109,7 +106,6 @@ class GroupKeywordPlugin(Star):
         conn.close()
         yield event.plain_result(f"已添加关键词「{keyword}」。")
 
-    # ---------- 删除关键词 ----------
     @filter.command("删除")
     async def del_kw(self, event: AstrMessageEvent):
         """删除本群关键词。格式：/删除 关键词"""
@@ -136,7 +132,6 @@ class GroupKeywordPlugin(Star):
         else:
             yield event.plain_result(f"本群没有关键词「{keyword}」。")
 
-    # ---------- 修改关键词 ----------
     @filter.command("修改")
     async def edit_kw(self, event: AstrMessageEvent):
         """修改本群关键词的回复。格式：/修改 关键词 新回复内容"""
@@ -168,7 +163,6 @@ class GroupKeywordPlugin(Star):
         conn.close()
         yield event.plain_result(f"已修改关键词「{keyword}」的回复。")
 
-    # ---------- 查看本群关键词 ----------
     @filter.command("关键词清单")
     async def list_kw(self, event: AstrMessageEvent):
         """查看本群所有关键词"""
@@ -190,7 +184,6 @@ class GroupKeywordPlugin(Star):
             lines.append(f"· {r['keyword']} → {reply_preview}")
         yield event.plain_result("\n".join(lines))
 
-  # ---------- 关键词匹配自动回复 ----------
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE)
     async def on_group_message(self, event: AstrMessageEvent):
         gid = self._get_group_id(event)
@@ -199,7 +192,6 @@ class GroupKeywordPlugin(Star):
         msg = event.message_str.strip()
         if not msg:
             return
-        # 管理指令消息不触发关键词匹配（兼容带或不带前缀符号的情况）
         cmd_words = ("添加", "删除", "修改", "关键词清单")
         cleaned = msg.lstrip("/／!！#").strip()
         if cleaned.startswith(cmd_words):
@@ -216,3 +208,4 @@ class GroupKeywordPlugin(Star):
 
     async def terminate(self):
         logger.info("[群关键词] 插件已卸载")
+GROUPKW_EOF
