@@ -190,7 +190,7 @@ class GroupKeywordPlugin(Star):
             lines.append(f"· {r['keyword']} → {reply_preview}")
         yield event.plain_result("\n".join(lines))
 
-    # ---------- 关键词匹配自动回复 ----------
+  # ---------- 关键词匹配自动回复 ----------
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE)
     async def on_group_message(self, event: AstrMessageEvent):
         gid = self._get_group_id(event)
@@ -199,8 +199,10 @@ class GroupKeywordPlugin(Star):
         msg = event.message_str.strip()
         if not msg:
             return
-        # 指令消息不触发关键词（避免管理指令被当成关键词）
-        if msg.startswith("/"):
+        # 管理指令消息不触发关键词匹配（兼容带或不带前缀符号的情况）
+        cmd_words = ("添加", "删除", "修改", "关键词清单")
+        cleaned = msg.lstrip("/／!！#").strip()
+        if cleaned.startswith(cmd_words):
             return
         conn = self._conn()
         c = conn.cursor()
