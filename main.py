@@ -1,12 +1,35 @@
 import os
 import sqlite3
 import datetime
-from astrbot.api.event import filter, AstrMessageEvent
+from astrbot.api.event import filter, AstrMessageEvent, MessageChain
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger, AstrBotConfig
 
+# 内置默认关键词模板（新群0条词时自动灌入）
+DEFAULT_TEMPLATE = {
+    "菜单": " 目前支持自动识别关键词：排谷、肾期、交肾、肾码、捆序、截排、通知群、全款、定尾、汇率、存肾、拖肾、撤排、调价、分签、到货、排发\n\n【严格按照关键词触发，模糊识别暂不可用】",
+    "排谷": " 该关键词尚未配置回答，请联系管理员修改或删除\n\n【此为触发关键词自动回答，如有误判请发送“菜单”获得更多关键词查询。】",
+    "肾期": " 该关键词尚未配置回答，请联系管理员修改或删除\n\n【此为触发关键词自动回答，如有误判请发送“菜单”获得更多关键词查询。】",
+    "到货": " 该关键词尚未配置回答，请联系管理员修改或删除\n\n【此为触发关键词自动回答，如有误判请发送“菜单”获得更多关键词查询。】",
+    "交肾": " 该关键词尚未配置回答，请联系管理员修改或删除\n\n【此为触发关键词自动回答，如有误判请发送“菜单”获得更多关键词查询。】",
+    "全款": " 该关键词尚未配置回答，请联系管理员修改或删除\n\n【此为触发关键词自动回答，如有误判请发送“菜单”获得更多关键词查询。】",
+    "定尾": " 该关键词尚未配置回答，请联系管理员修改或删除\n\n【此为触发关键词自动回答，如有误判请发送“菜单”获得更多关键词查询。】",
+    "汇率": " 该关键词尚未配置回答，请联系管理员修改或删除\n\n【此为触发关键词自动回答，如有误判请发送“菜单”获得更多关键词查询。】",
+    "存肾": " 该关键词尚未配置回答，请联系管理员修改或删除\n\n【此为触发关键词自动回答，如有误判请发送“菜单”获得更多关键词查询。】",
+    "拖肾": " 该关键词尚未配置回答，请联系管理员修改或删除\n\n【此为触发关键词自动回答，如有误判请发送“菜单”获得更多关键词查询。】",
+    "撤排": " 该关键词尚未配置回答，请联系管理员修改或删除\n\n【此为触发关键词自动回答，如有误判请发送“菜单”获得更多关键词查询。】",
+    "调价": " 该关键词尚未配置回答，请联系管理员修改或删除\n\n【此为触发关键词自动回答，如有误判请发送“菜单”获得更多关键词查询。】",
+    "截排": " 该关键词尚未配置回答，请联系管理员修改或删除\n\n【此为触发关键词自动回答，如有误判请发送“菜单”获得更多关键词查询。】",
+    "均价": " 该关键词尚未配置回答，请联系管理员修改或删除\n\n【此为触发关键词自动回答，如有误判请发送“菜单”获得更多关键词查询。】",
+    "排发": " 该关键词尚未配置回答，请联系管理员修改或删除\n\n【此为触发关键词自动回答，如有误判请发送“菜单”获得更多关键词查询。】",
+    "肾码": " 该关键词尚未配置回答，请联系管理员修改或删除\n\n【此为触发关键词自动回答，如有误判请发送“菜单”获得更多关键词查询。】",
+    "通知群": "该关键词尚未配置回答，请联系管理员修改或删除\n\n【此为触发关键词自动回答，如有误判请发送“菜单”获得更多关键词查询。】",
+    "捆序": "该关键词尚未配置回答，请联系管理员修改或删除\n\n【此为触发关键词自动回答，如有误判请发送“菜单”获得更多关键词查询。】",
+    "分签": " 该关键词尚未配置回答，请联系管理员修改或删除\n\n【此为触发关键词自动回答，如有误判请发送“菜单”获得更多关键词查询。】",
+}
 
-@register("groupkw", "Oct1Nov0", "多群关键词自动回复，群主管理员可自助管理本群关键词", "1.1.0", "https://github.com/Oct1Nov0/astrbot_plugin_groupkw")
+
+@register("groupkw", "Oct1Nov0", "多群关键词自动回复，群主管理员可自助管理本群关键词", "1.3.0", "https://github.com/Oct1Nov0/astrbot_plugin_groupkw")
 class GroupKeywordPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -58,6 +81,32 @@ class GroupKeywordPlugin(Star):
     def _now(self):
         return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+    def _count_keywords(self, gid: str) -> int:
+        conn = self._conn()
+        c = conn.cursor()
+        c.execute("SELECT COUNT(*) FROM keywords WHERE group_id=?", (gid,))
+        n = c.fetchone()[0]
+        conn.close()
+        return n
+
+    def _load_template(self, gid: str) -> int:
+        conn = self._conn()
+        c = conn.cursor()
+        now = self._now()
+        added = 0
+        for kw, reply in DEFAULT_TEMPLATE.items():
+            try:
+                c.execute(
+                    "INSERT INTO keywords (group_id, keyword, reply, created_by, created_at) VALUES (?,?,?,?,?)",
+                    (gid, kw, reply, "default", now),
+                )
+                added += 1
+            except sqlite3.IntegrityError:
+                pass
+        conn.commit()
+        conn.close()
+        return added
+
     def _is_group_enabled(self, gid: str) -> bool:
         conn = self._conn()
         c = conn.cursor()
@@ -108,7 +157,20 @@ class GroupKeywordPlugin(Star):
         c.execute("INSERT OR REPLACE INTO enabled_groups (group_id, enabled_at) VALUES (?,?)", (gid, self._now()))
         conn.commit()
         conn.close()
-        yield event.plain_result(f"已在群 {gid} 开启关键词功能。该群群主、管理员现在可以管理本群关键词。")
+        tpl_msg = ""
+        if self._count_keywords(gid) == 0:
+            n = self._load_template(gid)
+            tpl_msg = f"，并已写入 {n} 条默认关键词模板"
+        try:
+            client = event.bot
+            await client.api.call_action(
+                "send_group_msg",
+                group_id=int(gid),
+                message="\u200bbot已唤醒，请发送“菜单”查看关键词吧～",
+            )
+        except Exception as e:
+            logger.warning(f"[群关键词] 向群 {gid} 发送唤醒提示失败：{e}")
+        yield event.plain_result(f"已在群 {gid} 开启关键词功能{tpl_msg}，并已在群内发送提示。")
 
     @filter.command("关闭")
     async def disable_group(self, event: AstrMessageEvent):
@@ -142,7 +204,7 @@ class GroupKeywordPlugin(Star):
             return
         parts = event.message_str.strip().split(maxsplit=2)
         if len(parts) < 3:
-            yield event.plain_result("格式：/添加 关键词 回复内容\n例如：/添加 发货 每周三统一发货哦")
+            yield event.plain_result("指令有误bot看不懂喵~请检查指令")
             return
         keyword = parts[1].strip()
         reply = parts[2].strip()
@@ -175,7 +237,7 @@ class GroupKeywordPlugin(Star):
             return
         parts = event.message_str.strip().split(maxsplit=1)
         if len(parts) < 2:
-            yield event.plain_result("格式：/删除 关键词")
+            yield event.plain_result("指令有误bot看不懂喵~请检查指令")
             return
         keyword = parts[1].strip()
         conn = self._conn()
@@ -203,7 +265,7 @@ class GroupKeywordPlugin(Star):
             return
         parts = event.message_str.strip().split(maxsplit=2)
         if len(parts) < 3:
-            yield event.plain_result("格式：/修改 关键词 新回复内容")
+            yield event.plain_result("指令有误bot看不懂喵~请检查指令")
             return
         keyword = parts[1].strip()
         reply = parts[2].strip()
@@ -266,7 +328,7 @@ class GroupKeywordPlugin(Star):
         conn.close()
         for r in rows:
             if r["keyword"] and r["keyword"] in msg:
-                yield event.plain_result(r["reply"])
+                yield event.plain_result("\u200b\n" + r["reply"])
                 return
 
     async def terminate(self):
