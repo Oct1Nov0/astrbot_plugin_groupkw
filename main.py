@@ -29,7 +29,7 @@ DEFAULT_TEMPLATE = {
 }
 
 
-@register("groupkw", "Oct1Nov0", "多群关键词自动回复，支持图文", "1.4.0", "https://github.com/Oct1Nov0/astrbot_plugin_groupkw")
+@register("groupkw", "Oct1Nov0", "多群关键词自动回复，支持图文、等价词", "1.6.0", "https://github.com/Oct1Nov0/astrbot_plugin_groupkw")
 class GroupKeywordPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -78,6 +78,16 @@ class GroupKeywordPlugin(Star):
         CREATE TABLE IF NOT EXISTS enabled_groups (
             group_id TEXT PRIMARY KEY,
             enabled_at TEXT
+        )
+        """)
+        c.execute("""
+        CREATE TABLE IF NOT EXISTS aliases (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            group_id TEXT,
+            alias TEXT,
+            main_keyword TEXT,
+            created_at TEXT,
+            UNIQUE(group_id, alias)
         )
         """)
         conn.commit()
@@ -370,6 +380,107 @@ class GroupKeywordPlugin(Star):
         conn.close()
         yield event.plain_result(f"已修改关键词「{keyword}」的回复。")
 
+    @filter.command("加等价词")
+    async def add_alias(self, event: AstrMessageEvent):
+        """给主关键词加等价词。格式：/加等价词 主词 等价词"""
+        gid = self._get_group_id(event)
+        if not gid:
+            yield event.plain_result("请在群里使用本指令。")
+            return
+        if not self._is_group_enabled(gid):
+            return
+        if not self._can_manage(event):
+            yield event.plain_result("只有本群群主、管理员才能管理关键词。")
+            return
+        parts = event.message_str.strip().split(maxsplit=2)
+        if len(parts) < 3:
+            yield event.plain_result("指令有误bot看不懂喵~请检查指令")
+            return
+        main_kw = parts[1].strip()
+        alias = parts[2].strip()
+        conn = self._conn()
+        c = conn.cursor()
+        # 主关键词必须已存在
+        c.execute("SELECT id FROM keywords WHERE group_id=? AND keyword=?", (gid, main_kw))
+        if not c.fetchone():
+            conn.close()
+            yield event.plain_result(f"本群没有关键词「{main_kw}」，请先用 /添加 创建它。")
+            return
+        # 等价词不能本身已是某个关键词
+        c.execute("SELECT id FROM keywords WHERE group_id=? AND keyword=?", (gid, alias))
+        if c.fetchone():
+            conn.close()
+            yield event.plain_result("该词已是其他关键词，不能设为等价词，请删除或修改关键词")
+            return
+        # 等价词不能已经挂在别处
+        c.execute("SELECT main_keyword FROM aliases WHERE group_id=? AND alias=?", (gid, alias))
+        exist = c.fetchone()
+        if exist:
+            conn.close()
+            yield event.plain_result(f"等价词「{alias}」已挂在关键词「{exist['main_keyword']}」下了。")
+            return
+        c.execute(
+            "INSERT INTO aliases (group_id, alias, main_keyword, created_at) VALUES (?,?,?,?)",
+            (gid, alias, main_kw, self._now()),
+        )
+        conn.commit()
+        conn.close()
+        yield event.plain_result(f"已为「{main_kw}」添加等价词「{alias}」。")
+
+    @filter.command("删等价词")
+    async def del_alias(self, event: AstrMessageEvent):
+        """删除某个等价词。格式：/删等价词 主词 等价词"""
+        gid = self._get_group_id(event)
+        if not gid:
+            yield event.plain_result("请在群里使用本指令。")
+            return
+        if not self._is_group_enabled(gid):
+            return
+        if not self._can_manage(event):
+            yield event.plain_result("只有本群群主、管理员才能管理关键词。")
+            return
+        parts = event.message_str.strip().split(maxsplit=2)
+        if len(parts) < 3:
+            yield event.plain_result("指令有误bot看不懂喵~请检查指令")
+            return
+        main_kw = parts[1].strip()
+        alias = parts[2].strip()
+        conn = self._conn()
+        c = conn.cursor()
+        c.execute("DELETE FROM aliases WHERE group_id=? AND alias=? AND main_keyword=?", (gid, alias, main_kw))
+        deleted = c.rowcount
+        conn.commit()
+        conn.close()
+        if deleted:
+            yield event.plain_result(f"已删除「{main_kw}」的等价词「{alias}」。")
+        else:
+            yield event.plain_result(f"没找到「{main_kw}」下的等价词「{alias}」。")
+
+    @filter.command("等价词清单")
+    async def list_alias(self, event: AstrMessageEvent):
+        """查看本群所有等价词"""
+        gid = self._get_group_id(event)
+        if not gid:
+            yield event.plain_result("请在群里使用本指令。")
+            return
+        if not self._is_group_enabled(gid):
+            return
+        conn = self._conn()
+        c = conn.cursor()
+        c.execute("SELECT main_keyword, alias FROM aliases WHERE group_id=? ORDER BY main_keyword, id", (gid,))
+        rows = c.fetchall()
+        conn.close()
+        if not rows:
+            yield event.plain_result("本群还没有设置等价词。用 /加等价词 主词 等价词 来添加。")
+            return
+        groups = {}
+        for r in rows:
+            groups.setdefault(r["main_keyword"], []).append(r["alias"])
+        lines = [f"本群等价词（共{len(rows)}个）："]
+        for main_kw, aliases in groups.items():
+            lines.append(f"· {main_kw} ＝ {'、'.join(aliases)}")
+        yield event.plain_result("\n".join(lines))
+
     @filter.command("关键词清单")
     async def list_kw(self, event: AstrMessageEvent):
         """查看本群所有关键词"""
@@ -404,7 +515,7 @@ class GroupKeywordPlugin(Star):
         msg = event.message_str.strip()
         if not msg:
             return
-        cmd_words = ("添加", "删除", "修改", "关键词清单", "开启", "关闭", "添加图片", "删除图片")
+        cmd_words = ("添加", "删除", "修改", "关键词清单", "开启", "关闭", "添加图片", "删除图片", "加等价词", "删等价词", "等价词清单")
         cleaned = msg.lstrip("/／!！#").strip()
         if cleaned.startswith(cmd_words):
             return
@@ -412,20 +523,36 @@ class GroupKeywordPlugin(Star):
         c = conn.cursor()
         c.execute("SELECT keyword, reply, image_url FROM keywords WHERE group_id=?", (gid,))
         rows = c.fetchall()
-        conn.close()
+        # 直接匹配关键词
+        hit = None
         for r in rows:
             if r["keyword"] and r["keyword"] in msg:
-                text = r["reply"]
-                img = r["image_url"]
-                if text:
-                    yield event.plain_result("\u200b\n" + text)
-                if img:
-                    try:
-                        yield event.chain_result([Comp.Image.fromURL(img)])
-                    except Exception as e:
-                        logger.warning(f"[群关键词] 发送图片失败：{e}")
-                        yield event.plain_result("图片已过期，请重新配置~")
-                return
+                hit = r
+                break
+        # 没中关键词，再看等价词
+        if hit is None:
+            c.execute("SELECT alias, main_keyword FROM aliases WHERE group_id=?", (gid,))
+            for a in c.fetchall():
+                if a["alias"] and a["alias"] in msg:
+                    for r in rows:
+                        if r["keyword"] == a["main_keyword"]:
+                            hit = r
+                            break
+                    if hit:
+                        break
+        conn.close()
+        if hit is not None:
+            text = hit["reply"]
+            img = hit["image_url"]
+            if text:
+                yield event.plain_result("\u200b\n" + text)
+            if img:
+                try:
+                    yield event.chain_result([Comp.Image.fromURL(img)])
+                except Exception as e:
+                    logger.warning(f"[群关键词] 发送图片失败：{e}")
+                    yield event.plain_result("图片已过期，请重新配置~")
+            return
 
     async def terminate(self):
         logger.info("[群关键词] 插件已卸载")
