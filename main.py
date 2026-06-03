@@ -29,7 +29,7 @@ DEFAULT_TEMPLATE = {
 }
 
 
-@register("groupkw", "Oct1Nov0", "多群关键词自动回复，支持图文、等价词", "1.6.0", "https://github.com/Oct1Nov0/astrbot_plugin_groupkw")
+@register("groupkw", "Oct1Nov0", "多群关键词自动回复，支持图文、等价词、多词触发", "1.7.0", "https://github.com/Oct1Nov0/astrbot_plugin_groupkw")
 class GroupKeywordPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -523,27 +523,40 @@ class GroupKeywordPlugin(Star):
         c = conn.cursor()
         c.execute("SELECT keyword, reply, image_url FROM keywords WHERE group_id=?", (gid,))
         rows = c.fetchall()
-        # 直接匹配关键词
-        hit = None
-        for r in rows:
-            if r["keyword"] and r["keyword"] in msg:
-                hit = r
-                break
-        # 没中关键词，再看等价词
-        if hit is None:
-            c.execute("SELECT alias, main_keyword FROM aliases WHERE group_id=?", (gid,))
-            for a in c.fetchall():
-                if a["alias"] and a["alias"] in msg:
-                    for r in rows:
-                        if r["keyword"] == a["main_keyword"]:
-                            hit = r
-                            break
-                    if hit:
-                        break
+        kw_map = {r["keyword"]: r for r in rows}
+        c.execute("SELECT alias, main_keyword FROM aliases WHERE group_id=?", (gid,))
+        alias_rows = c.fetchall()
         conn.close()
-        if hit is not None:
-            text = hit["reply"]
-            img = hit["image_url"]
+
+        # 收集所有命中的主关键词（按在消息中出现位置排序，去重）
+        hit_keywords = []
+        for kw, r in kw_map.items():
+            if kw and kw in msg:
+                pos = msg.find(kw)
+                hit_keywords.append((pos, kw))
+        # 等价词命中，归到主关键词
+        for a in alias_rows:
+            alias = a["alias"]
+            main_kw = a["main_keyword"]
+            if alias and alias in msg and main_kw in kw_map:
+                pos = msg.find(alias)
+                hit_keywords.append((pos, main_kw))
+        # 去重（同一主关键词只保留一次，取最靠前的位置）
+        seen = {}
+        for pos, kw in hit_keywords:
+            if kw not in seen or pos < seen[kw]:
+                seen[kw] = pos
+        ordered = sorted(seen.items(), key=lambda x: x[1])
+
+        if not ordered:
+            return
+
+        LIMIT = 3
+        to_reply = ordered[:LIMIT]
+        for kw, _pos in to_reply:
+            r = kw_map[kw]
+            text = r["reply"]
+            img = r["image_url"]
             if text:
                 yield event.plain_result("\u200b\n" + text)
             if img:
@@ -552,7 +565,9 @@ class GroupKeywordPlugin(Star):
                 except Exception as e:
                     logger.warning(f"[群关键词] 发送图片失败：{e}")
                     yield event.plain_result("图片已过期，请重新配置~")
-            return
+        if len(ordered) > LIMIT:
+            yield event.plain_result("已同时触发多个关键词，bot最多只能处理3个噢，稍后再试吧~")
+        return
 
     async def terminate(self):
         logger.info("[群关键词] 插件已卸载")
