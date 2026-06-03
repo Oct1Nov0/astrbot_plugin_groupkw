@@ -1,11 +1,11 @@
 import os
 import sqlite3
 import datetime
-from astrbot.api.event import filter, AstrMessageEvent, MessageChain
+import astrbot.api.message_components as Comp
+from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger, AstrBotConfig
 
-# 内置默认关键词模板（新群0条词时自动灌入）
 DEFAULT_TEMPLATE = {
     "菜单": " 目前支持自动识别关键词：排谷、肾期、交肾、肾码、捆序、截排、通知群、全款、定尾、汇率、存肾、拖肾、撤排、调价、分签、到货、排发\n\n【严格按照关键词触发，模糊识别暂不可用】",
     "排谷": " 该关键词尚未配置回答，请联系管理员修改或删除\n\n【此为触发关键词自动回答，如有误判请发送“菜单”获得更多关键词查询。】",
@@ -29,7 +29,7 @@ DEFAULT_TEMPLATE = {
 }
 
 
-@register("groupkw", "Oct1Nov0", "多群关键词自动回复，群主管理员可自助管理本群关键词", "1.3.0", "https://github.com/Oct1Nov0/astrbot_plugin_groupkw")
+@register("groupkw", "Oct1Nov0", "多群关键词自动回复，支持图文", "1.4.0", "https://github.com/Oct1Nov0/astrbot_plugin_groupkw")
 class GroupKeywordPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -69,6 +69,11 @@ class GroupKeywordPlugin(Star):
             UNIQUE(group_id, keyword)
         )
         """)
+        # 升级：加 image_url 列（已存在则忽略）
+        try:
+            c.execute("ALTER TABLE keywords ADD COLUMN image_url TEXT DEFAULT ''")
+        except sqlite3.OperationalError:
+            pass
         c.execute("""
         CREATE TABLE IF NOT EXISTS enabled_groups (
             group_id TEXT PRIMARY KEY,
@@ -97,8 +102,8 @@ class GroupKeywordPlugin(Star):
         for kw, reply in DEFAULT_TEMPLATE.items():
             try:
                 c.execute(
-                    "INSERT INTO keywords (group_id, keyword, reply, created_by, created_at) VALUES (?,?,?,?,?)",
-                    (gid, kw, reply, "default", now),
+                    "INSERT INTO keywords (group_id, keyword, reply, image_url, created_by, created_at) VALUES (?,?,?,?,?,?)",
+                    (gid, kw, reply, "", "default", now),
                 )
                 added += 1
             except sqlite3.IntegrityError:
@@ -140,6 +145,18 @@ class GroupKeywordPlugin(Star):
             return str(gid) if gid else ""
         except Exception:
             return ""
+
+    def _extract_image_url(self, event: AstrMessageEvent) -> str:
+        # 从当前消息里提取第一张图片的url
+        try:
+            raw = event.message_obj.raw_message
+            if isinstance(raw, dict):
+                for seg in raw.get("message", []):
+                    if isinstance(seg, dict) and seg.get("type") == "image":
+                        return seg.get("data", {}).get("url", "")
+        except Exception as e:
+            logger.warning(f"[群关键词] 提取图片url失败：{e}")
+        return ""
 
     @filter.command("开启")
     async def enable_group(self, event: AstrMessageEvent):
@@ -192,7 +209,7 @@ class GroupKeywordPlugin(Star):
 
     @filter.command("添加")
     async def add_kw(self, event: AstrMessageEvent):
-        """添加本群关键词。格式：/添加 关键词 回复内容"""
+        """添加本群文字关键词。格式：/添加 关键词 回复内容"""
         gid = self._get_group_id(event)
         if not gid:
             yield event.plain_result("请在群里使用本指令。")
@@ -216,12 +233,81 @@ class GroupKeywordPlugin(Star):
             yield event.plain_result(f"关键词「{keyword}」本群已存在，用 /修改 {keyword} 新回复。")
             return
         c.execute(
-            "INSERT INTO keywords (group_id, keyword, reply, created_by, created_at) VALUES (?,?,?,?,?)",
-            (gid, keyword, reply, str(event.get_sender_id()), self._now()),
+            "INSERT INTO keywords (group_id, keyword, reply, image_url, created_by, created_at) VALUES (?,?,?,?,?,?)",
+            (gid, keyword, reply, "", str(event.get_sender_id()), self._now()),
         )
         conn.commit()
         conn.close()
         yield event.plain_result(f"已添加关键词「{keyword}」。")
+
+    @filter.command("添加图片")
+    async def add_image_kw(self, event: AstrMessageEvent):
+        """添加本群图片关键词。发送图片同时输入：/添加图片 关键词 文字(可选)"""
+        gid = self._get_group_id(event)
+        if not gid:
+            yield event.plain_result("请在群里使用本指令。")
+            return
+        if not self._is_group_enabled(gid):
+            return
+        if not self._can_manage(event):
+            yield event.plain_result("只有本群群主、管理员才能管理关键词。")
+            return
+        img_url = self._extract_image_url(event)
+        if not img_url:
+            yield event.plain_result("没检测到图片。请在发送图片的同时输入指令（图片和指令在同一条消息里）。")
+            return
+        parts = event.message_str.strip().split(maxsplit=2)
+        if len(parts) < 2:
+            yield event.plain_result("指令有误bot看不懂喵~请检查指令")
+            return
+        keyword = parts[1].strip()
+        text = parts[2].strip() if len(parts) >= 3 else ""
+        conn = self._conn()
+        c = conn.cursor()
+        c.execute("SELECT id FROM keywords WHERE group_id=? AND keyword=?", (gid, keyword))
+        if c.fetchone():
+            c.execute(
+                "UPDATE keywords SET reply=?, image_url=?, created_by=?, created_at=? WHERE group_id=? AND keyword=?",
+                (text, img_url, str(event.get_sender_id()), self._now(), gid, keyword),
+            )
+            msg = f"已更新图片关键词「{keyword}」。"
+        else:
+            c.execute(
+                "INSERT INTO keywords (group_id, keyword, reply, image_url, created_by, created_at) VALUES (?,?,?,?,?,?)",
+                (gid, keyword, text, img_url, str(event.get_sender_id()), self._now()),
+            )
+            msg = f"已添加图片关键词「{keyword}」。"
+        conn.commit()
+        conn.close()
+        yield event.plain_result(msg)
+
+    @filter.command("删除图片")
+    async def del_image_kw(self, event: AstrMessageEvent):
+        """删除本群图片关键词。格式：/删除图片 关键词"""
+        gid = self._get_group_id(event)
+        if not gid:
+            yield event.plain_result("请在群里使用本指令。")
+            return
+        if not self._is_group_enabled(gid):
+            return
+        if not self._can_manage(event):
+            yield event.plain_result("只有本群群主、管理员才能管理关键词。")
+            return
+        parts = event.message_str.strip().split(maxsplit=2)
+        if len(parts) < 2:
+            yield event.plain_result("指令有误bot看不懂喵~请检查指令")
+            return
+        keyword = parts[1].strip()
+        conn = self._conn()
+        c = conn.cursor()
+        c.execute("DELETE FROM keywords WHERE group_id=? AND keyword=?", (gid, keyword))
+        deleted = c.rowcount
+        conn.commit()
+        conn.close()
+        if deleted:
+            yield event.plain_result(f"已删除关键词「{keyword}」。")
+        else:
+            yield event.plain_result(f"本群没有关键词「{keyword}」。")
 
     @filter.command("删除")
     async def del_kw(self, event: AstrMessageEvent):
@@ -253,7 +339,7 @@ class GroupKeywordPlugin(Star):
 
     @filter.command("修改")
     async def edit_kw(self, event: AstrMessageEvent):
-        """修改本群关键词的回复。格式：/修改 关键词 新回复内容"""
+        """修改本群关键词的文字回复。格式：/修改 关键词 新回复内容"""
         gid = self._get_group_id(event)
         if not gid:
             yield event.plain_result("请在群里使用本指令。")
@@ -295,7 +381,7 @@ class GroupKeywordPlugin(Star):
             return
         conn = self._conn()
         c = conn.cursor()
-        c.execute("SELECT keyword, reply FROM keywords WHERE group_id=? ORDER BY id", (gid,))
+        c.execute("SELECT keyword, reply, image_url FROM keywords WHERE group_id=? ORDER BY id", (gid,))
         rows = c.fetchall()
         conn.close()
         if not rows:
@@ -303,8 +389,9 @@ class GroupKeywordPlugin(Star):
             return
         lines = [f"本群关键词（共{len(rows)}个）："]
         for r in rows:
-            reply_preview = r["reply"] if len(r["reply"]) <= 20 else r["reply"][:20] + "…"
-            lines.append(f"· {r['keyword']} → {reply_preview}")
+            tag = "[图]" if r["image_url"] else ""
+            preview = r["reply"] if len(r["reply"]) <= 18 else r["reply"][:18] + "…"
+            lines.append(f"· {r['keyword']} {tag}→ {preview}")
         yield event.plain_result("\n".join(lines))
 
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE)
@@ -317,20 +404,28 @@ class GroupKeywordPlugin(Star):
         msg = event.message_str.strip()
         if not msg:
             return
-        cmd_words = ("添加", "删除", "修改", "关键词清单", "开启", "关闭")
+        cmd_words = ("添加", "删除", "修改", "关键词清单", "开启", "关闭", "添加图片", "删除图片")
         cleaned = msg.lstrip("/／!！#").strip()
         if cleaned.startswith(cmd_words):
             return
         conn = self._conn()
         c = conn.cursor()
-        c.execute("SELECT keyword, reply FROM keywords WHERE group_id=?", (gid,))
+        c.execute("SELECT keyword, reply, image_url FROM keywords WHERE group_id=?", (gid,))
         rows = c.fetchall()
         conn.close()
         for r in rows:
             if r["keyword"] and r["keyword"] in msg:
-                yield event.plain_result("\u200b\n" + r["reply"])
+                text = r["reply"]
+                img = r["image_url"]
+                if text:
+                    yield event.plain_result("\u200b\n" + text)
+                if img:
+                    try:
+                        yield event.chain_result([Comp.Image.fromURL(img)])
+                    except Exception as e:
+                        logger.warning(f"[群关键词] 发送图片失败：{e}")
+                        yield event.plain_result("图片已过期，请重新配置~")
                 return
 
     async def terminate(self):
         logger.info("[群关键词] 插件已卸载")
-GROUPKW_EOF
