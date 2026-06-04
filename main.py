@@ -1,4 +1,6 @@
 import os
+import time
+import asyncio
 import sqlite3
 import datetime
 import astrbot.api.message_components as Comp
@@ -29,7 +31,7 @@ DEFAULT_TEMPLATE = {
 }
 
 
-@register("groupkw", "Oct1Nov0", "多群关键词自动回复，支持图文、等价词、多词触发", "2.0.0", "https://github.com/Oct1Nov0/astrbot_plugin_groupkw")
+@register("groupkw", "Oct1Nov0", "多群关键词自动回复，支持图文、等价词、多词触发、限速", "2.1.0", "https://github.com/Oct1Nov0/astrbot_plugin_groupkw")
 class GroupKeywordPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -39,6 +41,14 @@ class GroupKeywordPlugin(Star):
         os.makedirs(self.data_dir, exist_ok=True)
         self.db_path = os.path.join(self.data_dir, "groupkw.db")
         self._init_db()
+        # 限速相关（内存记录，重启清空）
+        self._last_trigger = {}   # key: "群号:QQ" -> 上次触发时间戳
+        self._warned = set()      # 已经发过"刷屏"提示的 "群号:QQ"，避免重复提示
+        self._send_lock = asyncio.Lock()
+        self._last_send_ts = 0.0  # 上次发送时间戳，用于全局发送间隔
+        self.RATE_WINDOW = 30     # 同一人触发冷却秒数
+        self.SEND_INTERVAL = 1.0  # 全局发送间隔秒数
+        self.REPLY_DELAY = 1.0    # 回复延迟秒数
         logger.info(f"[群关键词] 插件已加载，数据库：{self.db_path}")
 
     def _super_admins(self):
@@ -155,6 +165,61 @@ class GroupKeywordPlugin(Star):
             return str(gid) if gid else ""
         except Exception:
             return ""
+
+    def _check_rate(self, gid: str, uid: str):
+        # 返回 (是否放行, 是否需要发刷屏提示)
+        key = f"{gid}:{uid}"
+        now = time.time()
+        last = self._last_trigger.get(key, 0)
+        if now - last >= self.RATE_WINDOW:
+            # 冷却已过，放行，重置状态
+            self._last_trigger[key] = now
+            self._warned.discard(key)
+            return True, False
+        # 冷却中
+        if key not in self._warned:
+            # 第一次超频，发提示
+            self._warned.add(key)
+            return False, True
+        # 已提示过，静默忽略
+        return False, False
+
+    async def _send_text(self, event: AstrMessageEvent, text: str):
+        # 带全局发送间隔的文字发送
+        async with self._send_lock:
+            wait = self.SEND_INTERVAL - (time.time() - self._last_send_ts)
+            if wait > 0:
+                await asyncio.sleep(wait)
+            try:
+                client = event.bot
+                await client.api.call_action(
+                    "send_group_msg",
+                    group_id=int(self._get_group_id(event)),
+                    message=str(text),
+                )
+            except Exception as e:
+                logger.warning(f"[群关键词] 发送文字失败：{e}")
+            self._last_send_ts = time.time()
+
+    async def _send_image(self, event: AstrMessageEvent, img: str) -> bool:
+        # 带全局发送间隔的图片发送，返回是否成功
+        async with self._send_lock:
+            wait = self.SEND_INTERVAL - (time.time() - self._last_send_ts)
+            if wait > 0:
+                await asyncio.sleep(wait)
+            ok = False
+            try:
+                client = event.bot
+                await client.api.call_action(
+                    "send_group_msg",
+                    group_id=int(self._get_group_id(event)),
+                    message=[{"type": "image", "data": {"file": img}}],
+                )
+                ok = True
+            except Exception as e:
+                logger.warning(f"[群关键词] 发送图片失败（可能已过期）：{e}")
+            self._last_send_ts = time.time()
+            return ok
 
     def _pure_text(self, event: AstrMessageEvent) -> str:
         # 只取消息里的文字段（type=text），跳过 at/image 等，避免被@人的昵称误触发关键词
@@ -599,6 +664,17 @@ class GroupKeywordPlugin(Star):
         if not ordered:
             return
 
+        # 限速：同一人30秒只响应一次
+        uid = str(event.get_sender_id())
+        allowed, need_warn = self._check_rate(gid, uid)
+        if not allowed:
+            if need_warn:
+                await self._send_text(event, "刷屏啦，请30秒后再试~")
+            return
+
+        # 回复延迟
+        await asyncio.sleep(self.REPLY_DELAY)
+
         LIMIT = 3
         to_reply = ordered[:LIMIT]
         for kw, _pos in to_reply:
@@ -606,23 +682,13 @@ class GroupKeywordPlugin(Star):
             text = r["reply"]
             img = r["image_url"]
             if text:
-                yield event.plain_result("\u200b\n" + text)
+                await self._send_text(event, "\u200b\n" + text)
             if img:
-                ok = False
-                try:
-                    client = event.bot
-                    await client.api.call_action(
-                        "send_group_msg",
-                        group_id=int(gid),
-                        message=[{"type": "image", "data": {"file": img}}],
-                    )
-                    ok = True
-                except Exception as e:
-                    logger.warning(f"[群关键词] 发送图片失败（可能已过期）：{e}")
+                ok = await self._send_image(event, img)
                 if not ok:
-                    yield event.plain_result("图片已过期，请重新配置~")
+                    await self._send_text(event, "图片已过期，请重新配置~")
         if len(ordered) > LIMIT:
-            yield event.plain_result("已同时触发多个关键词，bot最多只能处理3个噢，稍后再试吧~")
+            await self._send_text(event, "已同时触发多个关键词，bot最多只能处理3个噢，稍后再试吧~")
         return
 
     async def terminate(self):
