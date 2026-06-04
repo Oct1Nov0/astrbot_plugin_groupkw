@@ -29,7 +29,7 @@ DEFAULT_TEMPLATE = {
 }
 
 
-@register("groupkw", "Oct1Nov0", "多群关键词自动回复，支持图文、等价词、多词触发", "1.7.0", "https://github.com/Oct1Nov0/astrbot_plugin_groupkw")
+@register("groupkw", "Oct1Nov0", "多群关键词自动回复，支持图文、等价词、多词触发", "1.8.0", "https://github.com/Oct1Nov0/astrbot_plugin_groupkw")
 class GroupKeywordPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -560,10 +560,18 @@ class GroupKeywordPlugin(Star):
             if text:
                 yield event.plain_result("\u200b\n" + text)
             if img:
+                ok = False
                 try:
-                    yield event.chain_result([Comp.Image.fromURL(img)])
+                    client = event.bot
+                    await client.api.call_action(
+                        "send_group_msg",
+                        group_id=int(gid),
+                        message=[{"type": "image", "data": {"file": img}}],
+                    )
+                    ok = True
                 except Exception as e:
-                    logger.warning(f"[群关键词] 发送图片失败：{e}")
+                    logger.warning(f"[群关键词] 发送图片失败（可能已过期）：{e}")
+                if not ok:
                     yield event.plain_result("图片已过期，请重新配置~")
         if len(ordered) > LIMIT:
             yield event.plain_result("已同时触发多个关键词，bot最多只能处理3个噢，稍后再试吧~")
