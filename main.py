@@ -31,7 +31,7 @@ DEFAULT_TEMPLATE = {
 }
 
 
-@register("groupkw", "Oct1Nov0", "多群关键词自动回复，支持图文、等价词、多词触发、限速", "2.1.0", "https://github.com/Oct1Nov0/astrbot_plugin_groupkw")
+@register("groupkw", "Oct1Nov0", "多群关键词自动回复，支持图文、等价词、多词触发、限速、一键清空", "2.2.0", "https://github.com/Oct1Nov0/astrbot_plugin_groupkw")
 class GroupKeywordPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -47,6 +47,7 @@ class GroupKeywordPlugin(Star):
         self.RATE_WINDOW = 30
         self.SEND_INTERVAL = 1.0
         self.REPLY_DELAY = 1.0
+        self._pending_clear = {}
         logger.info(f"[群关键词] 插件已加载，数据库：{self.db_path}")
 
     def _super_admins(self):
@@ -550,6 +551,57 @@ class GroupKeywordPlugin(Star):
             lines.append(f"· {main_kw} ＝ {'、'.join(aliases)}")
         yield event.plain_result("\n".join(lines))
 
+    @filter.command("清空关键词")
+    async def clear_keywords(self, event: AstrMessageEvent):
+        """清空本群所有关键词（需二次确认）。格式：/清空关键词"""
+        gid = self._get_group_id(event)
+        if not gid:
+            yield event.plain_result("请在群里使用本指令。")
+            return
+        if not self._is_group_enabled(gid):
+            return
+        if not self._can_manage(event):
+            yield event.plain_result("只有本群群主、管理员才能管理关键词。")
+            return
+        conn = self._conn()
+        c = conn.cursor()
+        c.execute("SELECT COUNT(*) FROM keywords WHERE group_id=?", (gid,))
+        n = c.fetchone()[0]
+        conn.close()
+        if n == 0:
+            yield event.plain_result("本群还没有关键词，无需清空。")
+            return
+        self._pending_clear[f"{gid}:{event.get_sender_id()}"] = time.time()
+        yield event.plain_result(f"确定要清空本群全部 {n} 个关键词吗？等价词也会一起删除，此操作不可恢复。\n请在30秒内发送 /确认清空 来执行。")
+
+    @filter.command("确认清空")
+    async def confirm_clear(self, event: AstrMessageEvent):
+        """确认清空本群所有关键词。格式：/确认清空"""
+        gid = self._get_group_id(event)
+        if not gid:
+            yield event.plain_result("请在群里使用本指令。")
+            return
+        if not self._is_group_enabled(gid):
+            return
+        if not self._can_manage(event):
+            yield event.plain_result("只有本群群主、管理员才能管理关键词。")
+            return
+        key = f"{gid}:{event.get_sender_id()}"
+        ts = self._pending_clear.get(key, 0)
+        if not ts or time.time() - ts > 30:
+            self._pending_clear.pop(key, None)
+            yield event.plain_result("没有待确认的清空操作，或已超过30秒。请重新发送 /清空关键词。")
+            return
+        self._pending_clear.pop(key, None)
+        conn = self._conn()
+        c = conn.cursor()
+        c.execute("DELETE FROM keywords WHERE group_id=?", (gid,))
+        kw_deleted = c.rowcount
+        c.execute("DELETE FROM aliases WHERE group_id=?", (gid,))
+        conn.commit()
+        conn.close()
+        yield event.plain_result(f"已清空本群全部关键词（共 {kw_deleted} 个）及其等价词。")
+
     @filter.command("关键词清单")
     async def list_kw(self, event: AstrMessageEvent):
         """查看本群所有关键词"""
@@ -584,7 +636,7 @@ class GroupKeywordPlugin(Star):
         msg = self._pure_text(event)
         if not msg:
             return
-        cmd_words = ("添加", "删除", "修改", "关键词清单", "开启", "关闭", "添加图片", "删除图片", "加等价词", "删等价词", "等价词清单")
+        cmd_words = ("添加", "删除", "修改", "关键词清单", "开启", "关闭", "添加图片", "删除图片", "加等价词", "删等价词", "等价词清单", "清空关键词", "确认清空")
         cleaned = msg.lstrip("/／!！#").strip()
         if cleaned.startswith(cmd_words):
             return
