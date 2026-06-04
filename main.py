@@ -3,10 +3,20 @@ import time
 import asyncio
 import sqlite3
 import datetime
+import base64
+import uuid
 import astrbot.api.message_components as Comp
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger, AstrBotConfig
+
+try:
+    import aiohttp
+    _HAS_AIOHTTP = True
+except ImportError:
+    aiohttp = None
+    _HAS_AIOHTTP = False
+    logger.warning("[群关键词] 未安装 aiohttp，自动上传图片功能不可用，请 pip install aiohttp")
 
 DEFAULT_TEMPLATE = {
     "菜单": " 目前支持自动识别关键词：排谷、肾期、交肾、肾码、捆序、截排、通知群、全款、定尾、汇率、存肾、拖肾、撤排、调价、分签、到货、排发\n\n【严格按照关键词触发，模糊识别暂不可用】",
@@ -31,7 +41,7 @@ DEFAULT_TEMPLATE = {
 }
 
 
-@register("groupkw", "Oct1Nov0", "多群关键词自动回复，支持图文链接、等价词、多词触发、限速、一键清空", "2.3.0", "https://github.com/Oct1Nov0/astrbot_plugin_groupkw")
+@register("groupkw", "Oct1Nov0", "多群关键词自动回复，支持图文链接、自动上传图床、等价词、多词触发、限速、一键清空", "2.4.0", "https://github.com/Oct1Nov0/astrbot_plugin_groupkw")
 class GroupKeywordPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -48,7 +58,23 @@ class GroupKeywordPlugin(Star):
         self.SEND_INTERVAL = 1.0
         self.REPLY_DELAY = 1.0
         self._pending_clear = {}
+        # GitHub 自动上传相关配置（在插件配置界面填写）
+        self.MAX_IMG_SIZE = 10 * 1024 * 1024  # 单图上限 10MB
+        self.UPLOAD_TIMEOUT = 15  # 上传/下载超时秒数
         logger.info(f"[群关键词] 插件已加载，数据库：{self.db_path}")
+
+    def _gh_token(self):
+        return str(self.config.get("github_token", "")).strip()
+
+    def _gh_repo(self):
+        return str(self.config.get("github_repo", "Oct1Nov0/bot-images")).strip()
+
+    def _gh_branch(self):
+        return str(self.config.get("github_branch", "main")).strip() or "main"
+
+    def _gh_proxy(self):
+        # 可选的 GitHub API 代理地址，留空走直连
+        return str(self.config.get("github_proxy", "")).strip().rstrip("/")
 
     def _super_admins(self):
         raw = self.config.get("super_admin_qq", "")
@@ -207,6 +233,100 @@ class GroupKeywordPlugin(Star):
             logger.warning(f"[群关键词] 提取图片url失败：{e}")
         return ""
 
+    def _guess_ext(self, qq_url: str) -> str:
+        # 从 QQ 图片链接里猜扩展名，默认 jpg
+        low = qq_url.lower()
+        for ext in (".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"):
+            if ext in low:
+                return ext.lstrip(".")
+        return "jpg"
+
+    def _gen_filename(self, ext: str) -> str:
+        # 时间戳 + 随机串，避免重名覆盖
+        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        rnd = uuid.uuid4().hex[:4]
+        return f"{ts}_{rnd}.{ext}"
+
+    def _jsdelivr_url(self, path: str) -> str:
+        # 把仓库内文件路径拼成 jsDelivr CDN 链接
+        repo = self._gh_repo()
+        branch = self._gh_branch()
+        return f"https://cdn.jsdelivr.net/gh/{repo}@{branch}/{path}"
+
+    async def _download_qq_image(self, qq_url: str):
+        """把 QQ 图片下载到内存。返回 (图片字节, 错误信息)，成功时错误为空。"""
+        if not qq_url:
+            return None, "没拿到图片链接"
+        try:
+            timeout = aiohttp.ClientTimeout(total=self.UPLOAD_TIMEOUT)
+            async with aiohttp.ClientSession(timeout=timeout) as sess:
+                async with sess.get(qq_url) as resp:
+                    if resp.status != 200:
+                        return None, f"下载图片失败（HTTP {resp.status}）"
+                    # 先看响应头里的大小，超限直接拒绝
+                    clen = resp.headers.get("Content-Length")
+                    if clen and clen.isdigit() and int(clen) > self.MAX_IMG_SIZE:
+                        return None, "图片太大了（超过10MB），请换张小一点的"
+                    # 边读边累计，超限即停
+                    chunks = []
+                    total = 0
+                    async for chunk in resp.content.iter_chunked(64 * 1024):
+                        total += len(chunk)
+                        if total > self.MAX_IMG_SIZE:
+                            return None, "图片太大了（超过10MB），请换张小一点的"
+                        chunks.append(chunk)
+                    return b"".join(chunks), ""
+        except asyncio.TimeoutError:
+            return None, "下载图片超时，请重试"
+        except Exception as e:
+            logger.warning(f"[群关键词] 下载QQ图片失败：{e}")
+            return None, "下载图片出错，请重试或改用手动配链接"
+
+    async def _upload_to_github(self, img_bytes: bytes, filename: str):
+        """把图片字节上传到 GitHub 仓库。返回 (jsDelivr链接, 错误信息)，成功时错误为空。"""
+        token = self._gh_token()
+        if not token:
+            return None, "没配置 GitHub 令牌，请在插件配置里填写 github_token，或改用手动配链接"
+        repo = self._gh_repo()
+        branch = self._gh_branch()
+        path = f"images/{filename}"  # 统一传到仓库的 images 目录下
+        # 拼接 GitHub API 地址，支持可选代理
+        proxy = self._gh_proxy()
+        base = proxy if proxy else "https://api.github.com"
+        api_url = f"{base}/repos/{repo}/contents/{path}"
+        content_b64 = base64.b64encode(img_bytes).decode("ascii")
+        payload = {
+            "message": f"bot upload {filename}",
+            "content": content_b64,
+            "branch": branch,
+        }
+        headers = {
+            "Authorization": f"token {token}",
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "astrbot-groupkw",
+        }
+        try:
+            timeout = aiohttp.ClientTimeout(total=self.UPLOAD_TIMEOUT)
+            async with aiohttp.ClientSession(timeout=timeout) as sess:
+                async with sess.put(api_url, json=payload, headers=headers) as resp:
+                    if resp.status in (200, 201):
+                        return self._jsdelivr_url(path), ""
+                    elif resp.status == 401:
+                        return None, "GitHub 令牌无效或已过期，请重新生成并填入配置"
+                    elif resp.status == 404:
+                        return None, "找不到仓库，请检查 github_repo 配置是否正确"
+                    elif resp.status == 403:
+                        return None, "GitHub 拒绝（权限不足或触发限流），请检查令牌权限"
+                    else:
+                        body = await resp.text()
+                        logger.warning(f"[群关键词] GitHub上传失败 HTTP {resp.status}：{body[:200]}")
+                        return None, f"上传失败（HTTP {resp.status}），可改用手动配链接"
+        except asyncio.TimeoutError:
+            return None, "连接 GitHub 超时（服务器可能连不上），请改用手动配链接或配置代理"
+        except Exception as e:
+            logger.warning(f"[群关键词] 上传GitHub出错：{e}")
+            return None, "上传 GitHub 出错（服务器可能连不上），请改用手动配链接或配置代理"
+
     @filter.command("开启")
     async def enable_group(self, event: AstrMessageEvent):
         """超级管理员在指定群开启关键词功能。格式：/开启 群号"""
@@ -289,36 +409,13 @@ class GroupKeywordPlugin(Star):
         conn.close()
         yield event.plain_result(f"已添加关键词「{keyword}」。")
 
-    @filter.command("添加图片")
-    async def add_image_kw(self, event: AstrMessageEvent):
-        """添加本群图片关键词。格式：/添加图片 关键词 图床链接 文字(可选)"""
-        gid = self._get_group_id(event)
-        if not gid:
-            yield event.plain_result("请在群里使用本指令。")
-            return
-        if not self._is_group_enabled(gid):
-            return
-        if not self._can_manage(event):
-            yield event.plain_result("只有本群群主、管理员才能管理关键词。")
-            return
-        # 解析：关键词 链接 [文字]
-        parts = event.message_str.strip().split(maxsplit=3)
-        if len(parts) < 3:
-            yield event.plain_result("指令有误bot看不懂喵~请检查指令\n格式：/添加图片 关键词 图床链接 文字(可选)")
-            return
-        keyword = parts[1].strip()
-        img_url = parts[2].strip()
-        if not (img_url.startswith("http://") or img_url.startswith("https://")):
-            yield event.plain_result("图床链接必须以 http 开头哦~请检查链接\n格式：/添加图片 关键词 图床链接 文字(可选)")
-            return
-        has_text = len(parts) >= 4 and parts[3].strip() != ""
-        text = parts[3].strip() if has_text else ""
+    def _store_image(self, gid: str, keyword: str, img_url: str, text: str, has_text: bool, uid: str) -> str:
+        """把一张图链接累加存进关键词。返回给用户的提示文字。"""
         conn = self._conn()
         c = conn.cursor()
         c.execute("SELECT reply, image_url FROM keywords WHERE group_id=? AND keyword=?", (gid, keyword))
         row = c.fetchone()
         now = self._now()
-        uid = str(event.get_sender_id())
         if row is None:
             # 关键词不存在：新建（带或不带文字）
             c.execute(
@@ -334,14 +431,12 @@ class GroupKeywordPlugin(Star):
             new_imgs = "\n".join(img_list)
             n = len(img_list)
             if has_text:
-                # 带文字：覆盖文字，累加图片
                 c.execute(
                     "UPDATE keywords SET reply=?, image_url=?, created_by=?, created_at=? WHERE group_id=? AND keyword=?",
                     (text, new_imgs, uid, now, gid, keyword),
                 )
                 msg = f"已更新「{keyword}」的文字并新增一张图（当前 {n} 张图）。"
             else:
-                # 不带文字：保留原文字，累加图片
                 c.execute(
                     "UPDATE keywords SET image_url=?, created_by=?, created_at=? WHERE group_id=? AND keyword=?",
                     (new_imgs, uid, now, gid, keyword),
@@ -349,6 +444,70 @@ class GroupKeywordPlugin(Star):
                 msg = f"已为「{keyword}」新增一张图（当前 {n} 张图，原文字保留）。"
         conn.commit()
         conn.close()
+        return msg
+
+    @filter.command("添加图片")
+    async def add_image_kw(self, event: AstrMessageEvent):
+        """添加本群图片关键词。
+        发图同时打：/添加图片 关键词 文字(可选)  → 自动上传
+        不带图：/添加图片 关键词 图床链接 文字(可选)  → 手动配链接"""
+        gid = self._get_group_id(event)
+        if not gid:
+            yield event.plain_result("请在群里使用本指令。")
+            return
+        if not self._is_group_enabled(gid):
+            return
+        if not self._can_manage(event):
+            yield event.plain_result("只有本群群主、管理员才能管理关键词。")
+            return
+        uid = str(event.get_sender_id())
+        qq_img = self._extract_image_url(event)
+
+        if qq_img:
+            # —— 模式一：消息带图，自动上传 ——
+            parts = event.message_str.strip().split(maxsplit=2)
+            if len(parts) < 2:
+                yield event.plain_result("指令有误bot看不懂喵~请检查指令\n发图同时打：/添加图片 关键词 文字(可选)")
+                return
+            keyword = parts[1].strip()
+            has_text = len(parts) >= 3 and parts[2].strip() != ""
+            text = parts[2].strip() if has_text else ""
+            if not _HAS_AIOHTTP:
+                yield event.plain_result("自动上传不可用（服务器缺少 aiohttp）。请改用手动配链接：/添加图片 关键词 图床链接")
+                return
+            if not self._gh_token():
+                yield event.plain_result("还没配置 GitHub 令牌，无法自动上传。请在插件配置里填 github_token，或改用手动配链接：/添加图片 关键词 图床链接")
+                return
+            yield event.plain_result("正在上传图片到图床，请稍候~")
+            # 下载到内存
+            img_bytes, err = await self._download_qq_image(qq_img)
+            if err:
+                yield event.plain_result(err)
+                return
+            # 上传 GitHub
+            ext = self._guess_ext(qq_img)
+            filename = self._gen_filename(ext)
+            cdn_url, err = await self._upload_to_github(img_bytes, filename)
+            if err:
+                yield event.plain_result(err)
+                return
+            msg = self._store_image(gid, keyword, cdn_url, text, has_text, uid)
+            yield event.plain_result(msg)
+            return
+
+        # —— 模式二：不带图，手动配链接 ——
+        parts = event.message_str.strip().split(maxsplit=3)
+        if len(parts) < 3:
+            yield event.plain_result("指令有误bot看不懂喵~请检查指令\n发图自动上传：/添加图片 关键词 文字(可选)\n手动配链接：/添加图片 关键词 图床链接 文字(可选)")
+            return
+        keyword = parts[1].strip()
+        img_url = parts[2].strip()
+        if not (img_url.startswith("http://") or img_url.startswith("https://")):
+            yield event.plain_result("没检测到图片，按手动配链接处理时，链接必须以 http 开头哦~\n发图自动上传：/添加图片 关键词 文字(可选)\n手动配链接：/添加图片 关键词 图床链接 文字(可选)")
+            return
+        has_text = len(parts) >= 4 and parts[3].strip() != ""
+        text = parts[3].strip() if has_text else ""
+        msg = self._store_image(gid, keyword, img_url, text, has_text, uid)
         yield event.plain_result(msg)
 
     @filter.command("删除图片")
