@@ -31,7 +31,7 @@ DEFAULT_TEMPLATE = {
 }
 
 
-@register("groupkw", "Oct1Nov0", "多群关键词自动回复，支持图文、等价词、多词触发、限速、一键清空", "2.2.0", "https://github.com/Oct1Nov0/astrbot_plugin_groupkw")
+@register("groupkw", "Oct1Nov0", "多群关键词自动回复，支持图文链接、等价词、多词触发、限速、一键清空", "2.3.0", "https://github.com/Oct1Nov0/astrbot_plugin_groupkw")
 class GroupKeywordPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -291,7 +291,7 @@ class GroupKeywordPlugin(Star):
 
     @filter.command("添加图片")
     async def add_image_kw(self, event: AstrMessageEvent):
-        """添加本群图片关键词。发送图片同时输入：/添加图片 关键词 文字(可选)"""
+        """添加本群图片关键词。格式：/添加图片 关键词 图床链接 文字(可选)"""
         gid = self._get_group_id(event)
         if not gid:
             yield event.plain_result("请在群里使用本指令。")
@@ -301,17 +301,18 @@ class GroupKeywordPlugin(Star):
         if not self._can_manage(event):
             yield event.plain_result("只有本群群主、管理员才能管理关键词。")
             return
-        img_url = self._extract_image_url(event)
-        if not img_url:
-            yield event.plain_result("没检测到图片。请在发送图片的同时输入指令（图片和指令在同一条消息里）。")
-            return
-        parts = event.message_str.strip().split(maxsplit=2)
-        if len(parts) < 2:
-            yield event.plain_result("指令有误bot看不懂喵~请检查指令")
+        # 解析：关键词 链接 [文字]
+        parts = event.message_str.strip().split(maxsplit=3)
+        if len(parts) < 3:
+            yield event.plain_result("指令有误bot看不懂喵~请检查指令\n格式：/添加图片 关键词 图床链接 文字(可选)")
             return
         keyword = parts[1].strip()
-        has_text = len(parts) >= 3 and parts[2].strip() != ""
-        text = parts[2].strip() if has_text else ""
+        img_url = parts[2].strip()
+        if not (img_url.startswith("http://") or img_url.startswith("https://")):
+            yield event.plain_result("图床链接必须以 http 开头哦~请检查链接\n格式：/添加图片 关键词 图床链接 文字(可选)")
+            return
+        has_text = len(parts) >= 4 and parts[3].strip() != ""
+        text = parts[3].strip() if has_text else ""
         conn = self._conn()
         c = conn.cursor()
         c.execute("SELECT reply, image_url FROM keywords WHERE group_id=? AND keyword=?", (gid, keyword))
@@ -324,23 +325,28 @@ class GroupKeywordPlugin(Star):
                 "INSERT INTO keywords (group_id, keyword, reply, image_url, created_by, created_at) VALUES (?,?,?,?,?,?)",
                 (gid, keyword, text, img_url, uid, now),
             )
-            msg = f"已添加图片关键词「{keyword}」。"
+            msg = f"已添加图片关键词「{keyword}」（当前 1 张图）。"
         else:
-            # 关键词已存在
+            # 关键词已存在：图片累加（多个链接用换行分隔）
+            old_imgs = row["image_url"] or ""
+            img_list = [u for u in old_imgs.split("\n") if u.strip()]
+            img_list.append(img_url)
+            new_imgs = "\n".join(img_list)
+            n = len(img_list)
             if has_text:
-                # 带文字：覆盖文字，并加图片
+                # 带文字：覆盖文字，累加图片
                 c.execute(
                     "UPDATE keywords SET reply=?, image_url=?, created_by=?, created_at=? WHERE group_id=? AND keyword=?",
-                    (text, img_url, uid, now, gid, keyword),
+                    (text, new_imgs, uid, now, gid, keyword),
                 )
-                msg = f"已更新「{keyword}」的文字并添加图片。"
+                msg = f"已更新「{keyword}」的文字并新增一张图（当前 {n} 张图）。"
             else:
-                # 不带文字：保留原文字，只加图片
+                # 不带文字：保留原文字，累加图片
                 c.execute(
                     "UPDATE keywords SET image_url=?, created_by=?, created_at=? WHERE group_id=? AND keyword=?",
-                    (img_url, uid, now, gid, keyword),
+                    (new_imgs, uid, now, gid, keyword),
                 )
-                msg = f"已为「{keyword}」添加图片（原文字回答保留）。"
+                msg = f"已为「{keyword}」新增一张图（当前 {n} 张图，原文字保留）。"
         conn.commit()
         conn.close()
         yield event.plain_result(msg)
@@ -696,22 +702,25 @@ class GroupKeywordPlugin(Star):
                 first = False
                 yield event.plain_result("\u200b\n" + text)
             if img:
-                if not first:
-                    await asyncio.sleep(self.SEND_INTERVAL)
-                first = False
-                ok = False
-                try:
-                    client = event.bot
-                    await client.api.call_action(
-                        "send_group_msg",
-                        group_id=int(gid),
-                        message=[{"type": "image", "data": {"file": img}}],
-                    )
-                    ok = True
-                except Exception as e:
-                    logger.warning(f"[群关键词] 发送图片失败（可能已过期）：{e}")
-                if not ok:
-                    yield event.plain_result("图片已过期，请重新配置~")
+                # 多张图用换行分隔，逐张发送
+                img_list = [u for u in img.split("\n") if u.strip()]
+                for one_img in img_list:
+                    if not first:
+                        await asyncio.sleep(self.SEND_INTERVAL)
+                    first = False
+                    ok = False
+                    try:
+                        client = event.bot
+                        await client.api.call_action(
+                            "send_group_msg",
+                            group_id=int(gid),
+                            message=[{"type": "image", "data": {"file": one_img}}],
+                        )
+                        ok = True
+                    except Exception as e:
+                        logger.warning(f"[群关键词] 发送图片失败（可能已过期）：{e}")
+                    if not ok:
+                        yield event.plain_result("图片已过期，请重新配置~")
         if len(ordered) > LIMIT:
             await asyncio.sleep(self.SEND_INTERVAL)
             yield event.plain_result("已同时触发多个关键词，bot最多只能处理3个噢，稍后再试吧~")
