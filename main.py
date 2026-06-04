@@ -29,7 +29,7 @@ DEFAULT_TEMPLATE = {
 }
 
 
-@register("groupkw", "Oct1Nov0", "多群关键词自动回复，支持图文、等价词、多词触发", "1.9.0", "https://github.com/Oct1Nov0/astrbot_plugin_groupkw")
+@register("groupkw", "Oct1Nov0", "多群关键词自动回复，支持图文、等价词、多词触发", "2.0.0", "https://github.com/Oct1Nov0/astrbot_plugin_groupkw")
 class GroupKeywordPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -288,22 +288,37 @@ class GroupKeywordPlugin(Star):
             yield event.plain_result("指令有误bot看不懂喵~请检查指令")
             return
         keyword = parts[1].strip()
-        text = parts[2].strip() if len(parts) >= 3 else ""
+        has_text = len(parts) >= 3 and parts[2].strip() != ""
+        text = parts[2].strip() if has_text else ""
         conn = self._conn()
         c = conn.cursor()
-        c.execute("SELECT id FROM keywords WHERE group_id=? AND keyword=?", (gid, keyword))
-        if c.fetchone():
-            c.execute(
-                "UPDATE keywords SET reply=?, image_url=?, created_by=?, created_at=? WHERE group_id=? AND keyword=?",
-                (text, img_url, str(event.get_sender_id()), self._now(), gid, keyword),
-            )
-            msg = f"已更新图片关键词「{keyword}」。"
-        else:
+        c.execute("SELECT reply, image_url FROM keywords WHERE group_id=? AND keyword=?", (gid, keyword))
+        row = c.fetchone()
+        now = self._now()
+        uid = str(event.get_sender_id())
+        if row is None:
+            # 关键词不存在：新建（带或不带文字）
             c.execute(
                 "INSERT INTO keywords (group_id, keyword, reply, image_url, created_by, created_at) VALUES (?,?,?,?,?,?)",
-                (gid, keyword, text, img_url, str(event.get_sender_id()), self._now()),
+                (gid, keyword, text, img_url, uid, now),
             )
             msg = f"已添加图片关键词「{keyword}」。"
+        else:
+            # 关键词已存在
+            if has_text:
+                # 带文字：覆盖文字，并加图片
+                c.execute(
+                    "UPDATE keywords SET reply=?, image_url=?, created_by=?, created_at=? WHERE group_id=? AND keyword=?",
+                    (text, img_url, uid, now, gid, keyword),
+                )
+                msg = f"已更新「{keyword}」的文字并添加图片。"
+            else:
+                # 不带文字：保留原文字，只加图片
+                c.execute(
+                    "UPDATE keywords SET image_url=?, created_by=?, created_at=? WHERE group_id=? AND keyword=?",
+                    (img_url, uid, now, gid, keyword),
+                )
+                msg = f"已为「{keyword}」添加图片（原文字回答保留）。"
         conn.commit()
         conn.close()
         yield event.plain_result(msg)
@@ -327,14 +342,30 @@ class GroupKeywordPlugin(Star):
         keyword = parts[1].strip()
         conn = self._conn()
         c = conn.cursor()
-        c.execute("DELETE FROM keywords WHERE group_id=? AND keyword=?", (gid, keyword))
-        deleted = c.rowcount
+        c.execute("SELECT reply, image_url FROM keywords WHERE group_id=? AND keyword=?", (gid, keyword))
+        row = c.fetchone()
+        if row is None:
+            conn.close()
+            yield event.plain_result(f"本群没有关键词「{keyword}」。")
+            return
+        if not row["image_url"]:
+            conn.close()
+            yield event.plain_result("该关键词没有图片")
+            return
+        if row["reply"]:
+            # 有文字：只删图片，保留文字
+            c.execute(
+                "UPDATE keywords SET image_url=?, created_at=? WHERE group_id=? AND keyword=?",
+                ("", self._now(), gid, keyword),
+            )
+            msg = f"已删除「{keyword}」的图片（文字回答保留）。"
+        else:
+            # 只有图片：删整条
+            c.execute("DELETE FROM keywords WHERE group_id=? AND keyword=?", (gid, keyword))
+            msg = f"已删除图片关键词「{keyword}」。"
         conn.commit()
         conn.close()
-        if deleted:
-            yield event.plain_result(f"已删除关键词「{keyword}」。")
-        else:
-            yield event.plain_result(f"本群没有关键词「{keyword}」。")
+        yield event.plain_result(msg)
 
     @filter.command("删除")
     async def del_kw(self, event: AstrMessageEvent):
