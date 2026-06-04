@@ -29,7 +29,7 @@ DEFAULT_TEMPLATE = {
 }
 
 
-@register("groupkw", "Oct1Nov0", "多群关键词自动回复，支持图文、等价词、多词触发", "1.8.0", "https://github.com/Oct1Nov0/astrbot_plugin_groupkw")
+@register("groupkw", "Oct1Nov0", "多群关键词自动回复，支持图文、等价词、多词触发", "1.9.0", "https://github.com/Oct1Nov0/astrbot_plugin_groupkw")
 class GroupKeywordPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -155,6 +155,23 @@ class GroupKeywordPlugin(Star):
             return str(gid) if gid else ""
         except Exception:
             return ""
+
+    def _pure_text(self, event: AstrMessageEvent) -> str:
+        # 只取消息里的文字段（type=text），跳过 at/image 等，避免被@人的昵称误触发关键词
+        try:
+            raw = event.message_obj.raw_message
+            if isinstance(raw, dict):
+                segs = raw.get("message", [])
+                if isinstance(segs, list):
+                    texts = []
+                    for seg in segs:
+                        if isinstance(seg, dict) and seg.get("type") == "text":
+                            texts.append(seg.get("data", {}).get("text", ""))
+                    return "".join(texts).strip()
+        except Exception as e:
+            logger.warning(f"[群关键词] 提取纯文字失败：{e}")
+        # 兜底：取不到分段就用 message_str
+        return event.message_str.strip()
 
     def _extract_image_url(self, event: AstrMessageEvent) -> str:
         # 从当前消息里提取第一张图片的url
@@ -512,7 +529,7 @@ class GroupKeywordPlugin(Star):
             return
         if not self._is_group_enabled(gid):
             return
-        msg = event.message_str.strip()
+        msg = self._pure_text(event)
         if not msg:
             return
         cmd_words = ("添加", "删除", "修改", "关键词清单", "开启", "关闭", "添加图片", "删除图片", "加等价词", "删等价词", "等价词清单")
