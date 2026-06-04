@@ -1,8 +1,32 @@
 {
   "super_admin_qq": {
-    "description": "超级管理员QQ号（多个用英文逗号隔开）",
+    "description": "超级管理员QQ号，多个用英文逗号隔开（可在任意群开启/关闭、管理关键词）",
     "type": "string",
-    "hint": "超级管理员可以管理任意群的关键词。各群的群主和管理员默认可管理本群关键词，无需在此填写。",
-    "default": ""
+    "default": "",
+    "hint": "例如：123456,789012"
+  },
+  "github_token": {
+    "description": "GitHub 个人访问令牌（自动上传图片用，仅勾选 repo 权限即可）",
+    "type": "string",
+    "default": "",
+    "hint": "在 GitHub 设置 Developer settings 里生成，不要泄露给任何人"
+  },
+  "github_repo": {
+    "description": "存图的 GitHub 仓库（格式：用户名/仓库名）",
+    "type": "string",
+    "default": "Oct1/bot-images",
+    "hint": "例如：Oct1/bot-images"
+  },
+  "github_branch": {
+    "description": "存图的分支名",
+    "type": "string",
+    "default": "main",
+    "hint": "一般填 main"
+  },
+  "github_proxy": {
+    "description": "GitHub API 代理地址（可选，留空走直连。服务器连不上 GitHub 时再填）",
+    "type": "string",
+    "default": "",
+    "hint": "例如：https://你的代理域名，留空即直连 api.github.com"
   }
 }
