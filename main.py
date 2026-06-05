@@ -846,9 +846,9 @@ class GroupKeywordPlugin(Star):
         conn.close()
         yield event.plain_result(f"已删除 {len(deleted)} 个关键词：{'、'.join(deleted)}，不存在的关键词已忽略。")
 
-    @filter.command("禁言")
+    @filter.command("休息")
     async def mute_bot(self, event: AstrMessageEvent):
-        """临时静默本群自动回复。格式：/禁言10分钟"""
+        """临时静默本群自动回复。格式：/休息10分钟"""
         gid = self._get_group_id(event)
         if not gid:
             yield event.plain_result("请在群里使用本指令。")
@@ -861,16 +861,16 @@ class GroupKeywordPlugin(Star):
         import re
         m = re.search(r"(\d+)", event.message_str)
         if not m:
-            yield event.plain_result("格式：/禁言10分钟")
+            yield event.plain_result("格式：/休息10分钟")
             return
         minutes = int(m.group(1))
         if minutes <= 0:
             yield event.plain_result("禁言时长要大于0分钟哦~")
             return
         self._muted_until[gid] = time.time() + minutes * 60
-        yield event.plain_result(f"已禁言{minutes}分钟，期间不再自动回复关键词。可发送 /bot解禁 提前恢复。")
+        yield event.plain_result(f"bot休息{minutes}分钟，期间不再自动回复关键词。可发送 /解除休息 提前恢复。")
 
-    @filter.command("解禁")
+    @filter.command("解除休息")
     async def unmute_bot(self, event: AstrMessageEvent):
         """提前解除本群静默。格式：/解禁"""
         gid = self._get_group_id(event)
@@ -881,7 +881,7 @@ class GroupKeywordPlugin(Star):
             yield event.plain_result("只有本群群主、管理员才能使用本指令。")
             return
         self._muted_until.pop(gid, None)
-        yield event.plain_result("已解除禁言，自动回复恢复啦~")
+        yield event.plain_result("已解除休息，自动回复恢复啦~")
 
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE)
     async def on_group_message(self, event: AstrMessageEvent):
@@ -895,7 +895,7 @@ class GroupKeywordPlugin(Star):
         msg = self._pure_text(event)
         if not msg:
             return
-        cmd_words = ("添加", "删除", "修改", "关键词清单", "开启", "关闭", "添加图片", "删除图片", "加等价词", "删等价词", "等价词清单", "清空关键词", "确认清空", "删除群关键词", "批量删除", "禁言", "解禁")
+        cmd_words = ("添加", "删除", "修改", "关键词清单", "开启", "关闭", "添加图片", "删除图片", "加等价词", "删等价词", "等价词清单", "清空关键词", "确认清空", "删除群关键词", "批量删除", "休息", "解除休息")
         cleaned = msg.lstrip("/／!！#").strip()
         if cleaned.startswith(cmd_words):
             return
