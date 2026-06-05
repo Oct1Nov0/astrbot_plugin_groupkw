@@ -41,7 +41,7 @@ DEFAULT_TEMPLATE = {
 }
 
 
-@register("groupkw", "Oct1Nov0", "多群关键词自动回复，支持图文链接、自动上传图床、等价词、多词触发、限速、一键清空", "2.4.0", "https://github.com/Oct1Nov0/astrbot_plugin_groupkw")
+@register("groupkw", "Oct1Nov0", "多群关键词自动回复，支持图文链接、自动上传图床、等价词、多词触发、限速、一键清空", "2.5.1", "https://github.com/Oct1Nov0/astrbot_plugin_groupkw")
 class GroupKeywordPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -164,6 +164,18 @@ class GroupKeywordPlugin(Star):
         row = c.fetchone()
         conn.close()
         return row is not None
+
+    def _purge_group(self, gid: str):
+        """删除某个群的全部关键词、等价词，并移出启用列表。退群时调用。"""
+        conn = self._conn()
+        c = conn.cursor()
+        c.execute("DELETE FROM keywords WHERE group_id=?", (gid,))
+        kw_n = c.rowcount
+        c.execute("DELETE FROM aliases WHERE group_id=?", (gid,))
+        c.execute("DELETE FROM enabled_groups WHERE group_id=?", (gid,))
+        conn.commit()
+        conn.close()
+        return kw_n
 
     def _can_manage(self, event: AstrMessageEvent) -> bool:
         if self._is_super(event):
@@ -791,6 +803,20 @@ class GroupKeywordPlugin(Star):
             lines.append(f"· {r['keyword']} {tag}→ {preview}")
         yield event.plain_result("\n".join(lines))
 
+    @filter.command("删除群关键词")
+    async def purge_group_cmd(self, event: AstrMessageEvent):
+        """超级管理员清除指定群的全部关键词数据并恢复未开启状态。格式：/删除群关键词 群号"""
+        if not self._is_super(event):
+            yield event.plain_result("只有超级管理员才能使用本指令。")
+            return
+        parts = event.message_str.strip().split(maxsplit=1)
+        if len(parts) < 2 or not parts[1].strip().isdigit():
+            yield event.plain_result("格式：/删除群关键词 群号\n例如：/删除群关键词 1234567")
+            return
+        gid = parts[1].strip()
+        kw_n = self._purge_group(gid)
+        yield event.plain_result(f"已清除群 {gid} 的全部关键词（共 {kw_n} 条）及等价词，并恢复为未开启状态。")
+
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE)
     async def on_group_message(self, event: AstrMessageEvent):
         gid = self._get_group_id(event)
@@ -801,7 +827,7 @@ class GroupKeywordPlugin(Star):
         msg = self._pure_text(event)
         if not msg:
             return
-        cmd_words = ("添加", "删除", "修改", "关键词清单", "开启", "关闭", "添加图片", "删除图片", "加等价词", "删等价词", "等价词清单", "清空关键词", "确认清空")
+        cmd_words = ("添加", "删除", "修改", "关键词清单", "开启", "关闭", "添加图片", "删除图片", "加等价词", "删等价词", "等价词清单", "清空关键词", "确认清空", "删除群关键词")
         cleaned = msg.lstrip("/／!！#").strip()
         if cleaned.startswith(cmd_words):
             return
